@@ -3,40 +3,63 @@
 /*
  *  SolarBotics BrutusBot
  *
- *  Part 1. Navigation by bump sensors and accelerometer only
- *
- *
  *  Author:   Carl F Timms
- *  Date:     January 2 2017
+ *  Date:     January 6 2017
  */
  
  
 // libraries
 #include "TimerOne.h"
+#include <Servo.h> 
+#include <NewPing.h>
+#include <SharpIR.h>
+
+
+// preprocessor directives
+#define ACCEL_X_TILT_THRESH   20      //accelerometer tilt threshold left/right
+#define ACCEL_Y_TILT_THRESH   50      //accelerometer tilt threshold forward/backward
+#define SERVO_MAX_RIGHT       600     //540 microseconds max right
+#define SERVO_MAX_LEFT        2400    //2400 microseconds max left
+#define US_TRIGGER_PIN        2       //ultrasonic trigger pin 
+#define US_ECHO_PIN           4       //ultrasonic echo pin          
+#define US_MAX_DISTANCE       500     //ultrasonic max range
+#define IR_PIN                5       //the pin where your sensor is attached  
+#define IR_READINGS           6       //the number of readings the library will make before calculating an average distance.          
+#define IR_DIFFERENCE         95      //the difference between two consecutive measurements to be taken as valid (in %)          
+#define IR_MODEL              1080    //is an int that determines your sensor:  1080 for GP2Y0A21Y, 20150 for GP2Y0A02Y          
 
 
 // pins
-const byte  switchPinLeft =   12; //left feeler digital pin 12
-const byte  switchPinRight =  13; //left feeler digital pin 13
-const int   yPin =             4; //y-axis accelerometer analogue pin 4
-const int   xPin =             5; //x-axis accelerometer analogue pin 5
+const byte  switchPinLeft   =   12; //left feeler digital pin 12
+const byte  switchPinRight  =   13; //left feeler digital pin 13
+const int   yPin            =   4;  //y-axis accelerometer analogue pin 4
+const int   xPin            =   5;  //x-axis accelerometer analogue pin 5
 
 
-// definitions
-#define X_TILT_THRESH         20      //accelerometer tilt threshold left/right
-#define Y_TILT_THRESH         50      //accelerometer tilt threshold forward/backward
-#define MAX_ACCEL_SAMPLES     10      //sample size of accelerometer read functions
-
-
-// global variables
+// global variables 
 volatile int seconds = 0; //seconds since program start 
 volatile int fullSec = 0; //flag - timed events only happen once in specified second
 volatile int driveMode = 0;
 volatile int program = 1;
+Servo servo;
+NewPing sonar(US_TRIGGER_PIN, US_ECHO_PIN, US_MAX_DISTANCE);
+SharpIR sharp(IR_PIN, IR_READINGS, IR_DIFFERENCE, IR_MODEL); 
 
 
- 
- 
+// function prototypes
+void drive(int command);
+bool feelerContact() ;
+int sampleX();
+int sampleY();
+bool stability();
+void panServo(int deg);
+int ultrasonic();
+int infrared();
+void sec_ISR();
+void brutusbot();
+
+
+// *** SETUP ***
 void setup() 
 {
   // initialise Timer1 and call function every second
@@ -47,6 +70,9 @@ void setup()
   pinMode (switchPinLeft, INPUT);   // Feeler pin left -> Input
   pinMode (switchPinRight, INPUT);  // Feeler pin right -> Input
 
+  // attach servo to D10
+  servo.attach(10);
+  
   // begin serial communication
   Serial.begin(9600);
   
@@ -57,6 +83,7 @@ void setup()
 
 
 
+// *** Loop ***
 void loop() 
 {
     brutusbot();
@@ -70,7 +97,7 @@ void loop()
 
 void drive(int command)
 /* 
- *  Defines the pre-set driving modes
+ *  Defines the pre-set driving modes.
  */
 {
   
@@ -88,8 +115,8 @@ void drive(int command)
   switch (command)
   {
     /*
-     * digitalWrite:  use for only LOW or HIGH
-     * analogWrite:   use for PWM signal 0-255
+     *  digitalWrite:  use for only LOW or HIGH
+     *  analogWrite:   use for PWM signal 0-255
      */  
 
    
@@ -138,8 +165,8 @@ void drive(int command)
 
 bool feelerContact() 
 /*
- * Returns TRUE if either feeler is in contact with an object.
- * Returns False otherwise
+ *  Returns TRUE if either feeler is in contact with an object.
+ *  Returns FALSE otherwise.
  */
 {
   if ( digitalRead(switchPinLeft) && digitalRead(switchPinRight) ) //if both feelers are not in contact (feelers read TRUE when not in contact with an object)
@@ -153,10 +180,12 @@ bool feelerContact()
 }
 
 
-// returns an averaged sample of values from the accelelerometer X axis (L/R)
 int sampleX() 
+/*
+ *  Returns an averaged sample of values from the accelelerometer X axis (L/R).
+ */
 {
-  int maxSamples = MAX_ACCEL_SAMPLES; 
+  int maxSamples = 10; 
   int noSamples = 0;
   int xTally = 0;
 
@@ -173,10 +202,13 @@ int sampleX()
 }
 
 
-// returns an averaged sample of values from the accelelerometer Y axis (F/B)
+// 
 int sampleY() 
+/*
+ *  Returns an averaged sample of values from the accelelerometer Y axis (F/B).
+ */
 {
-  int maxSamples = MAX_ACCEL_SAMPLES; 
+  int maxSamples = 10; 
   int noSamples = 0;
   int yTally = 0;
 
@@ -193,18 +225,21 @@ int sampleY()
 }
 
 
-//if BB tilted too far in any direction, return false.
-bool stability() 
+bool stability()
+/* 
+ *  Measures tilt angles.
+ *  If BB tilted too far in any direction, return FALSE.
+ */
 {
   //read the analog values from the accelerometer
   int xRead = sampleX();
   int yRead = sampleY();
 
-  if ((xRead < (-X_TILT_THRESH)) || (xRead > X_TILT_THRESH)) 
+  if ((xRead < (-ACCEL_X_TILT_THRESH)) || (xRead > ACCEL_X_TILT_THRESH)) 
   {
     return false;
   }
-  else if ((yRead < (-Y_TILT_THRESH)) || (yRead > Y_TILT_THRESH)) 
+  else if ((yRead < (-ACCEL_Y_TILT_THRESH)) || (yRead > ACCEL_Y_TILT_THRESH)) 
   {
     return false;
   } 
@@ -215,9 +250,56 @@ bool stability()
 }
 
 
+void panServo(int deg)
+/*
+ *  Rotates the servo to given angle.
+ *  Full right:  0
+ *  Full left:   180
+ */
+{
+  int mapDegrees = map(deg, 0, 180, SERVO_MAX_RIGHT, SERVO_MAX_LEFT); //map(value, fromLow, fromHigh, toLow, toHigh)
+  servo.writeMicroseconds(mapDegrees);
+}
 
-// increment one second 
+
+int ultrasonic() 
+{
+  /*
+   *  Returns reading from ultrasonic sensor in cm
+   */
+
+  int USping = sonar.ping_median(10);
+  int UScm = sonar.convert_cm(USping);
+
+  if(USping == 0) {
+    return 500;
+  }
+  
+  return UScm;
+}
+
+
+
+int infrared()
+/*  
+ *  Returns Infrared sensor reading
+ */
+{
+  int IRping = sharp.distance();
+
+//  Serial.print("Infrared: ");
+//  Serial.println(IRping);
+
+  return IRping;
+}
+
+
+
 void sec_ISR()
+/*
+ * Increment one second. 
+ * Set fullSec flag to 1
+ */
 {
   seconds++;
   fullSec = 1; //fullSec flag reset to TRUE by interrupt once per second
@@ -226,14 +308,16 @@ void sec_ISR()
 
 
 
+
 // ****** Main function ******
 
 void brutusbot()
 {
+  
   while(1)
   {
     //check if unstable
-    if(!stability())              //checkStability() -> if BB tilted too far in any direction, return false.
+    if(!stability())              
     {
       //bb is unstable. correct so he does not tip
         
@@ -241,34 +325,34 @@ void brutusbot()
       int xRead = sampleX();
       int yRead = sampleY();
     
-      if (yRead > Y_TILT_THRESH) { //if too far forward
+      if (yRead > ACCEL_Y_TILT_THRESH) { //if too far forward
         Serial.println("too far forward");
         drive(0);
         //TODO - decide how to react
         continue;
       } 
       
-      if (yRead < (-Y_TILT_THRESH)) { //if too far back
+      if (yRead < (-ACCEL_Y_TILT_THRESH)) { //if too far back
         Serial.println("too far back");
         drive(0);
         //TODO - decide how to react.       
         continue;
       }  
       
-      if (xRead < (-X_TILT_THRESH)) { //if too far left
+      if (xRead < (-ACCEL_X_TILT_THRESH)) { //if too far left
         Serial.println("too far left");
         drive(3); //spin left to avoid slope
-        while(xRead < (-X_TILT_THRESH))
+        while(xRead < (-ACCEL_X_TILT_THRESH))
         {
           xRead = sampleX(); 
         }
         continue;
       }
       
-      if (xRead > X_TILT_THRESH) { //if too far right
+      if (xRead > ACCEL_X_TILT_THRESH) { //if too far right
         Serial.println("too far right");
         drive(4); //spin right to avoid slope
-        while(xRead > X_TILT_THRESH)
+        while(xRead > ACCEL_X_TILT_THRESH)
         {
           xRead = sampleX(); 
         }
@@ -307,6 +391,7 @@ void brutusbot()
       else //BB is stable and feelers are clear of objects.  
       {
         drive(1);
+        //
       }
     }
   }
