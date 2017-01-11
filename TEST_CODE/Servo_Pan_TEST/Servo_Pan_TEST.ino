@@ -14,7 +14,6 @@ Servo servo;
 void setup() {
   servo.attach(10);
   Serial.begin(9600);
-  delay(5000);
 }
 
 
